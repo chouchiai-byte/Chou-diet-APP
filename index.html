@@ -95,7 +95,7 @@ const EXERCISE={'快走':4.3,'慢跑':7.0,'游泳':6.0,'騎自行車':6.8,'重�
 const DEFAULTS={
   apiKey:'',model:'claude-sonnet-5-5',
   targets:{kcal:1750,protein:[90,100],carbs:[150,180],carbsMin:130,fat:[55,70],satfat:19,sugar:25,fiber:25,sodium:2300},
-  height:175,startWeight:99,goals:[94,89],waistGoal:90,
+  height:0,startWeight:0,goals:[0,0],waistGoal:90,profileNote:'',metformin:false,
   alcohol:{plan:null,start:null},
   reminders:{breakfast:'09:30',lunch:'13:30',dinner:'20:00',weigh:'09:00'}
 };
@@ -151,11 +151,12 @@ function alcoholRule(date){
   if(d<60)return{week:2,session:2,times:1,label:'逐步減量第 2 個月：一週 1 次、每次最多 2 罐'};
   return{week:1,session:1,label:'逐步減量第 3 個月起：一週最多 1 罐'};
 }
-function latestWeight(){const w=db.body.filter(e=>e.type==='weight').sort((a,b)=>(a.date+a.ts)<(b.date+b.ts)?1:-1)[0];return w?w.v.weight:db.settings.startWeight}
+function latestWeight(){const w=db.body.filter(e=>e.type==='weight').sort((a,b)=>(a.date+a.ts)<(b.date+b.ts)?1:-1)[0];return w?w.v.weight:(db.settings.startWeight||70)}
 function guessMeal(){const h=new Date().getHours()+new Date().getMinutes()/60;return h<10.5?'早餐':h<14.5?'午餐':h<17?'點心':h<21?'晚餐':'宵夜'}
 
 /* ---------- 導覽 ---------- */
-let tab='home',draft=null,logDate=today(),metric='weight',busy=false;
+let tab='home',draft=null,logDate=today(),metric='weight',busy=false,snapDate=today(),snapMeal=null,snapText='',rec=null,pendingImport=null;
+const ctx=()=>({date:snapDate,mealType:snapMeal||guessMeal()});
 const TITLES={home:'今日',snap:'記錄飲食',log:'飲食紀錄',body:'身體數據',settings:'標準與提醒'};
 function go(t){tab=t;renderView();window.scrollTo(0,0)}
 function renderView(){
@@ -172,7 +173,7 @@ function alertsHtml(date,t){
   const s=db.settings,out=[],now=nowHM();
   if(!s.apiKey)out.push(['info','到「標準與提醒」輸入 Claude API 金鑰後，就能拍照辨識食物。']);
   const rule=alcoholRule(date),wb=weekBeer(date);
-  if(t.cans>=3)out.push(['bad',`今天已喝 ${t.cans} 罐。您有服用 metformin，一次大量飲酒會增加乳酸中毒風險，也請避免空腹喝酒。`]);
+  if(t.cans>=3)out.push(['bad',`今天已喝 ${t.cans} 罐。${s.metformin?'您有服用 metformin，一次大量飲酒會增加乳酸中毒風險，':'一次大量飲酒對血糖和血脂影響很大，'}也請避免空腹喝酒。`]);
   if(rule){
     if(rule.done)out.push(['info','暫停喝酒 3 個月已期滿，可以安排抽血，並到設定選擇下一階段的飲酒目標。']);
     else if(wb.cans>rule.week)out.push(['warn',`本週已喝 ${wb.cans} 罐，超過目標 ${rule.week} 罐。`]);
@@ -181,15 +182,17 @@ function alertsHtml(date,t){
   const has=m=>db.meals.some(x=>x.date===date&&x.mealType===m);
   [['breakfast','早餐'],['lunch','午餐'],['dinner','晚餐']].forEach(([k,n])=>{if(now>=s.reminders[k]&&!has(n))out.push(['warn',`還沒記錄${n}。`])});
   if(now>=s.reminders.weigh&&!db.body.some(e=>e.type==='weight'&&e.date===date))out.push(['info','今天還沒量體重。']);
-  if(now>='20:00'&&db.meals.some(m=>m.date===date)&&t.carbs<s.targets.carbsMin)out.push(['warn',`今天碳水只有 ${r0(t.carbs)} g，低於下限 ${s.targets.carbsMin} g。有服降血糖藥，請不要吃得太少。`]);
+  if(now>='20:00'&&db.meals.some(m=>m.date===date)&&t.carbs<s.targets.carbsMin)out.push(['warn',`今天碳水只有 ${r0(t.carbs)} g，低於下限 ${s.targets.carbsMin} g。${s.metformin?'有服降血糖藥，':''}請不要吃得太少。`]);
   if(t.sugar>s.targets.sugar)out.push(['bad',`添加糖已達 ${r0(t.sugar)} g，超過上限 ${s.targets.sugar} g。`]);
   return out.map(([c,m])=>`<div class="alert ${c}">${esc(m)}</div>`).join('');
 }
 function renderHome(){
   const d=today(),t=dayTotals(d),T=db.settings.targets,remain=T.kcal-r0(t.kcal);
   let h=alertsHtml(d,t);
+  if(!db.settings.height||!db.settings.startWeight)h+=profileCard(true);
   if(!db.settings.alcohol.plan)h+=alcoholPlanCard(true);
   h+=`<div class="card"><div class="row" style="align-items:flex-end"><div><div class="muted">今日熱量</div><div class="big">${r0(t.kcal)}<span class="muted" style="font-size:15px;font-weight:400"> / ${T.kcal} 大卡</span></div></div><div style="text-align:right"><div class="muted">${remain>=0?'還可以吃':'已超過'}</div><div style="font-size:22px;font-weight:700;color:${remain>=0?'var(--ok)':'var(--bad)'}">${Math.abs(remain)}</div></div></div>${barHtml('kcal',t.kcal)}</div>`;
+  h+=weeklyWeightCard();
   h+=`<div class="card"><h2>營養素</h2>`+NUTS.slice(1).map(([k,n,u])=>`<div class="row"><span>${n}</span><span class="muted"><b style="color:var(--text)">${r0(t[k])}</b> ${u}　目標 ${targetText(k)}</span></div>${barHtml(k,t[k])}`).join('')+(t.refined?`<div class="muted">今天吃了 ${t.refined} 項精緻澱粉或甜食</div>`:'')+`</div>`;
   const rule=alcoholRule(d),wb=weekBeer(d);
   h+=`<div class="card"><div class="row"><h2 style="margin:0">啤酒</h2><span class="muted">${rule?esc(rule.label):'尚未選擇目標'}</span></div>
@@ -201,6 +204,19 @@ function renderHome(){
   const meals=db.meals.filter(m=>m.date===d).sort((a,b)=>a.ts-b.ts);
   h+=`<div class="card"><div class="row"><h2 style="margin:0">今天吃了</h2><button class="btn sm" onclick="go('snap')">新增</button></div><div style="margin-top:10px">${meals.length?meals.map(mealRow).join(''):'<div class="muted">還沒有紀錄</div>'}</div></div>`;
   return h;
+}
+function weeklyWeights(){const by={};db.body.filter(e=>e.type==='weight').forEach(e=>{const ws=weekStart(e.date);(by[ws]=by[ws]||[]).push(e.v.weight)});return Object.keys(by).sort().map(ws=>({ws,avg:by[ws].reduce((a,b)=>a+b,0)/by[ws].length,n:by[ws].length}))}
+function weeklyWeightCard(){
+  const W=weeklyWeights(),S=db.settings;
+  if(!W.length)return`<div class="card"><div class="row"><h2 style="margin:0">每週體重變化</h2><button class="btn sm sec" onclick="go('body');bodyForm('weight')">記錄體重</button></div><div class="muted" style="margin-top:6px">記錄體重後，這裡會顯示每週平均和變化。</div></div>`;
+  const cur=W[W.length-1],prev=W.length>1?W[W.length-2]:null,thisWeek=cur.ws===weekStart(today());
+  const diff=prev?cur.avg-prev.avg:null,total=S.startWeight?cur.avg-S.startWeight:null;
+  const fmt=v=>(v>0?'+':v<0?'−':'±')+r1(Math.abs(v))+' kg',col=v=>v<0?'var(--ok)':v>0?'var(--bad)':'var(--muted)';
+  let h=`<div class="card"><h2>每週體重變化</h2><div class="grid3"><div><div class="muted">${thisWeek?'本週':'最近一週'}平均</div><b style="font-size:20px">${r1(cur.avg)}</b> <span class="muted">kg</span></div><div><div class="muted">比前一週</div><b style="font-size:20px;color:${diff==null?'var(--muted)':col(diff)}">${diff==null?'—':fmt(diff)}</b></div><div><div class="muted">比起始</div><b style="font-size:20px;color:${total==null?'var(--muted)':col(total)}">${total==null?'—':fmt(total)}</b></div></div>`;
+  if(W.length>1)h+=`<div style="margin-top:8px">${lineChart({s:[{n:'週平均',p:W.slice(-12).map(w=>({x:w.ws,y:r1(w.avg)}))}],t:S.goals.filter(Boolean),u:'kg'})}</div>`;
+  if(diff!=null&&diff<-1.2)h+=`<div class="alert warn" style="margin:8px 0 0">一週減超過 1.2 kg，速度偏快。請確認蛋白質有吃夠，碳水也不要低於下限。</div>`;
+  else if(diff!=null&&diff>0.3)h+=`<div class="muted" style="margin-top:6px">這週比前一週重，可以到「飲食紀錄」看看哪幾天熱量或啤酒偏多。</div>`;
+  return h+`<div class="muted" style="margin-top:6px">週平均以週一到週日計算${thisWeek?`（本週目前 ${cur.n} 筆）`:''}。固定在早上起床後量，數字會比較準。</div></div>`;
 }
 function mealRow(m){
   const k=m.items.reduce((a,i)=>a+num(i.kcal),0),c=m.items.reduce((a,i)=>a+num(i.carbs),0);
@@ -217,10 +233,20 @@ function addBeer(n){
 function addWater(n){const d=today();db.water[d]=Math.max(0,(db.water[d]||0)+n);save();renderView()}
 function delMeal(id){if(!confirm('刪除這一餐？'))return;db.meals=db.meals.filter(m=>m.id!==id);save();renderView()}
 
+/* ---------- 個人資料 ---------- */
+function profileCard(setup){
+  const S=db.settings;
+  return`<div class="card"><h2>${setup?'請先填寫個人資料':'個人資料與體重目標'}</h2><div class="muted">這些資料只存在這支手機裡。</div><div class="grid2">${fld('p_h','身高（cm）','number',S.height||'')}${fld('p_w','起始體重（kg）','number',S.startWeight||'')}${fld('p_g1','第一階段目標（kg）','number',S.goals[0]||'')}${fld('p_g2','第二階段目標（kg）','number',S.goals[1]||'')}</div>
+  <label class="f" for="p_note">個人狀況（給 AI 估算時參考，例如年齡、性別、要控制的項目）</label><textarea id="p_note" placeholder="例如：中年男性，控制血糖與三酸甘油酯">${esc(S.profileNote)}</textarea>
+  <label style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="p_met" style="width:auto" ${S.metformin?'checked':''}> 有服用 metformin（含此成分的降血糖藥），喝酒時顯示相關警示</label>
+  <button class="btn block" style="margin-top:12px" onclick="saveProfile()">儲存個人資料</button></div>`;
+}
+function saveProfile(){const n=id=>num($('#'+id).value),S=db.settings;if(!n('p_h')||!n('p_w'))return toast('請填寫身高和起始體重');S.height=n('p_h');S.startWeight=n('p_w');S.goals=[n('p_g1')||S.startWeight,n('p_g2')||n('p_g1')||S.startWeight];S.profileNote=$('#p_note').value.trim();S.metformin=$('#p_met').checked;save();toast('已儲存個人資料');renderView()}
+
 /* ---------- 飲酒方案 ---------- */
 function alcoholPlanCard(setup){
   const cur=db.settings.alcohol.plan;
-  const opts=[['A','暫停 3 個月','效果最明顯，3 個月後抽血看三酸甘油酯變化'],['B','一週最多 1 罐','每次最多 1 罐'],['C','只記錄','不設上限，只統計罐數'],['D','逐步減量','第 1 個月一週 2 次 × 3 罐；第 2 個月一週 1 次 × 2 罐；第 3 個月起一週 1 罐']];
+  const opts=[['A','暫停 3 個月','效果最明顯，3 個月後抽血看變化'],['B','一週最多 1 罐','每次最多 1 罐'],['C','只記錄','不設上限，只統計罐數'],['D','逐步減量','第 1 個月一週 2 次 × 3 罐；第 2 個月一週 1 次 × 2 罐；第 3 個月起一週 1 罐']];
   return`<div class="card"><h2>${setup?'請選擇飲酒目標':'飲酒目標'}</h2>${opts.map(([k,a,b])=>`<button class="opt ${cur===k?'on':''}" onclick="setPlan('${k}')"><b>${k}. ${a}</b><span class="muted">${b}</span></button>`).join('')}<div class="muted">${cur?`目前方案從 ${md(db.settings.alcohol.start)} 開始計算。重新選擇會從今天重新起算。`:'選擇後從今天開始計算，之後可以在「標準與提醒」更改。'}</div></div>`;
 }
 function setPlan(p){db.settings.alcohol={plan:p,start:today()};save();toast('已設定飲酒目標');renderView()}
@@ -229,7 +255,23 @@ function setPlan(p){db.settings.alcohol={plan:p,start:today()};save();toast('已
 const FORMAT=`只回傳 JSON，不要任何其他文字，格式：
 {"items":[{"name":"食物名稱","portion":"估計份量，例如 1 碗（約 200 g）","kcal":0,"protein":0,"carbs":0,"fat":0,"satfat":0,"sugar":0,"fiber":0,"sodium":0,"refined":false}],"note":"一句話說明估算的不確定處或飲食建議"}
 單位：kcal 為大卡，sodium 為毫克，其餘為公克。sugar 指添加糖（不含水果與奶類的天然糖）。refined 表示是否為精緻澱粉或甜食（白飯、白麵、麵包、糕點、含糖飲料等）。數字請用數值，不要加單位。`;
-const ROLE='你是台灣的臨床營養師。使用者是 48 歲男性，正在控制血糖與三酸甘油酯，請依台灣常見的份量與做法估算營養，特別仔細估算碳水化合物與添加糖。';
+const LABEL_PROMPT=`這是一張食品包裝或營養標示的照片。
+1. 若看得到營養標示：以「每一份」為單位回傳一個 item；name 用產品名稱；portion 寫成「1 份（約 X 公克），本包裝 N 份」。若只標示每 100 公克，就以每 100 公克為一份，portion 註明「每 100 公克」。數值依標示填寫；標示的「糖」填入 sugar（包裝食品的糖一律視為添加糖，只有純鮮乳、無加糖純果汁例外）；標示沒有的欄位（例如膳食纖維）可合理估算或填 0。
+2. 若看不到營養標示：依產品名稱與包裝辨識，以一份常見食用量估算。
+3. note 請說明整包共有幾份，並提醒是否高糖、高鈉或屬於精緻澱粉。`;
+const MIC_SVG='<svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
+function toggleMic(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){toast('請點文字框，再按鍵盤上的麥克風');$('#descText').focus();return}
+  if(rec){rec.stop();return}
+  const ta=$('#descText'),base=ta.value.trim()?ta.value.trim()+'，':'';
+  rec=new SR();rec.lang='zh-TW';rec.interimResults=true;rec.continuous=false;
+  rec.onresult=e=>{let t='';for(const r of e.results)t+=r[0].transcript;ta.value=base+t;snapText=ta.value};
+  rec.onerror=e=>toast(e.error==='not-allowed'?'請允許使用麥克風':'語音辨識失敗，可改用鍵盤上的麥克風');
+  rec.onend=()=>{rec=null;const b=$('#micBtn');if(b)b.lastChild.textContent='語音輸入'};
+  try{rec.start();$('#micBtn').lastChild.textContent='聆聽中，再按一次停止'}catch(e){rec=null;toast('無法啟動語音輸入，可改用鍵盤上的麥克風')}
+}
+const role=()=>'你是台灣的臨床營養師。'+(db.settings.profileNote?'使用者狀況：'+db.settings.profileNote+'。':'')+'請依台灣常見的份量與做法估算營養，特別仔細估算碳水化合物與添加糖。';
 async function callRaw(content,maxTokens){
   const s=db.settings;if(!s.apiKey)throw new Error('尚未設定 API 金鑰');
   const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'x-api-key':s.apiKey,'anthropic-version':'2023-06-01','content-type':'application/json','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:s.model,max_tokens:maxTokens||2000,messages:[{role:'user',content}]})});
@@ -241,31 +283,35 @@ function norm(it){return{name:String(it.name||'食物'),portion:String(it.portio
 const blank=()=>norm({name:''});
 function readImage(file){return new Promise((res,rej)=>{const img=new Image(),url=URL.createObjectURL(file);img.onload=()=>{const out=sz=>{const sc=Math.min(1,sz/Math.max(img.width,img.height)),c=document.createElement('canvas');c.width=Math.round(img.width*sc);c.height=Math.round(img.height*sc);c.getContext('2d').drawImage(img,0,0,c.width,c.height);return c};const full=out(1280).toDataURL('image/jpeg',.85),thumb=out(240).toDataURL('image/jpeg',.7);URL.revokeObjectURL(url);res({full,thumb})};img.onerror=()=>rej(new Error('無法讀取照片'));img.src=url})}
 function loadingView(msg){$('#view').innerHTML=`<div class="card" style="text-align:center"><div class="spin"></div><div>${esc(msg)}</div><div class="muted">約需 5–15 秒</div></div>`}
-async function onPhoto(input){
+async function onPhoto(input,mode){
   const file=input.files[0];input.value='';if(!file||busy)return;
   if(!db.settings.apiKey){toast('請先到「標準與提醒」輸入 API 金鑰');return}
   busy=true;loadingView('AI 辨識中…');let img;
-  try{img=await readImage(file);const res=await callJSON([{type:'image',source:{type:'base64',media_type:'image/jpeg',data:img.full.split(',')[1]}},{type:'text',text:ROLE+'\n請辨識照片中的每一樣食物與飲料。若照片中沒有食物，items 回傳空陣列並在 note 說明。\n'+FORMAT}]);
-    draft={photo:img.thumb,items:(res.items||[]).map(norm),note:res.note||'',mealType:guessMeal(),date:today()};
+  try{img=await readImage(file);const res=await callJSON([{type:'image',source:{type:'base64',media_type:'image/jpeg',data:img.full.split(',')[1]}},{type:'text',text:role()+'\n'+(mode==='label'?LABEL_PROMPT:'請辨識照片中的每一樣食物與飲料。若照片中沒有食物，items 回傳空陣列並在 note 說明。')+'\n'+FORMAT}]);
+    draft={photo:img.thumb,items:(res.items||[]).map(norm),note:res.note||'',label:mode==='label',...ctx()};
     if(!draft.items.length)draft.items.push(blank());
-  }catch(e){draft={photo:img?img.thumb:null,items:[blank()],note:'辨識失敗：'+e.message+'。可以手動輸入。',err:true,mealType:guessMeal(),date:today()}}
+  }catch(e){draft={photo:img?img.thumb:null,items:[blank()],note:'辨識失敗：'+e.message+'。可以手動輸入。',err:true,...ctx()}}
   busy=false;renderView();
 }
 async function estimateText(){
   const txt=$('#descText').value.trim();if(!txt){toast('請先輸入吃了什麼');return}
   if(!db.settings.apiKey){toast('請先到「標準與提醒」輸入 API 金鑰');return}
   busy=true;loadingView('AI 估算中…');
-  try{const res=await callJSON([{type:'text',text:ROLE+`\n使用者描述他吃了：「${txt}」。請拆成各項食物估算。\n`+FORMAT}]);draft={photo:null,items:(res.items||[]).map(norm),note:res.note||'',mealType:guessMeal(),date:today()};if(!draft.items.length)draft.items.push(blank())}
-  catch(e){draft={photo:null,items:[blank()],note:'估算失敗：'+e.message,err:true,mealType:guessMeal(),date:today()}}
+  try{const res=await callJSON([{type:'text',text:role()+`\n使用者描述他在${md(snapDate)}的${ctx().mealType}吃了：「${txt}」。請拆成各項食物估算；描述中份量不明確時，以台灣常見份量估算。\n`+FORMAT}]);draft={photo:null,items:(res.items||[]).map(norm),note:res.note||'',...ctx()};if(!draft.items.length)draft.items.push(blank());snapText=''}
+  catch(e){draft={photo:null,items:[blank()],note:'估算失敗：'+e.message,err:true,...ctx()}}
   busy=false;renderView();
 }
-function manual(){draft={photo:null,items:[blank()],note:'',mealType:guessMeal(),date:today()};renderView()}
+function manual(){draft={photo:null,items:[blank()],note:'',...ctx()};renderView()}
 function recentFoods(){const seen=new Set,out=[];[...db.meals].sort((a,b)=>b.ts-a.ts).forEach(m=>m.items.forEach(i=>{if(i.name&&!seen.has(i.name)&&out.length<12){seen.add(i.name);out.push(i)}}));return out}
-function quickAdd(name){const it=recentFoods().find(i=>i.name===name);if(!it)return;const n=norm({name:it.name,portion:it.portion,refined:it.refined,...(it.base||it)});if(!draft)draft={photo:null,items:[],note:'',mealType:guessMeal(),date:today()};draft.items.push(n);renderView()}
+function quickAdd(name){const it=recentFoods().find(i=>i.name===name);if(!it)return;const n=norm({name:it.name,portion:it.portion,refined:it.refined,...(it.base||it)});if(!draft)draft={photo:null,items:[],note:'',...ctx()};draft.items.push(n);renderView()}
 function renderSnap(){
   if(draft)return renderDraft();
-  let h=`<div class="card"><label class="btn block" style="padding:18px"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7l2-3h4l2 3"/><circle cx="12" cy="13.5" r="3.5"/></svg>拍照或選擇照片<input class="hidefile" type="file" accept="image/*" onchange="onPhoto(this)"></label><div class="muted" style="margin-top:8px">拍照時盡量從斜上方拍到整份餐點，放一支筷子或湯匙在旁邊，份量會估得比較準。</div></div>`;
-  h+=`<div class="card"><h2>用文字描述</h2><textarea id="descText" placeholder="例如：滷肉飯小碗、燙青菜、貢丸湯"></textarea><button class="btn block" style="margin-top:8px" onclick="estimateText()">AI 估算</button></div>`;
+  const mt=snapMeal||guessMeal();
+  let h=`<div class="card"><div class="row"><b>記錄到</b><input type="date" style="width:auto" value="${snapDate}" max="${today()}" onchange="snapDate=this.value||today();renderView()"></div><div class="seg" style="margin-top:8px">${MEALS.map(m=>`<button class="${mt===m?'on':''}" onclick="snapMeal='${m}';renderView()">${m}</button>`).join('')}</div>${snapDate!==today()?`<div class="alert info" style="margin:8px 0 0">補記模式：這一筆會記到 ${md(snapDate)}。<a href="#" onclick="snapDate=today();renderView();return false" style="color:inherit">改回今天</a></div>`:''}</div>`;
+  h+=`<div class="card"><label class="btn block" style="padding:16px"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7l2-3h4l2 3"/><circle cx="12" cy="13.5" r="3.5"/></svg>拍照或選擇餐點照片<input class="hidefile" type="file" accept="image/*" onchange="onPhoto(this,'meal')"></label>
+  <label class="btn sec block" style="padding:14px;margin-top:8px"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>拍食品包裝或營養標示<input class="hidefile" type="file" accept="image/*" onchange="onPhoto(this,'label')"></label>
+  <div class="muted" style="margin-top:8px">拍餐點時，從斜上方拍到整份，旁邊放筷子或湯匙，份量會估得比較準。拍包裝時，請讓「營養標示」整格清楚入鏡。</div></div>`;
+  h+=`<div class="card"><h2>用文字或語音描述</h2><textarea id="descText" oninput="snapText=this.value" placeholder="例如：一碗牛肉麵、一盤燙青菜、半杯無糖豆漿">${esc(snapText)}</textarea><div class="grid2" style="margin-top:8px"><button class="btn sec" id="micBtn" onclick="toggleMic()">${MIC_SVG}語音輸入</button><button class="btn" onclick="estimateText()">AI 估算</button></div><div class="muted" style="margin-top:6px">也可以點文字框，再按鍵盤上的麥克風直接說。忘了記錄的餐點，先在上方選日期和餐別再描述。</div></div>`;
   const rf=recentFoods();
   h+=`<div class="card"><div class="row"><h2 style="margin:0">手動輸入</h2><button class="btn sm sec" onclick="manual()">開始輸入</button></div>${rf.length?`<div class="muted" style="margin:10px 0 6px">常吃的食物（點一下加入）</div><div style="display:flex;flex-wrap:wrap;gap:6px">${rf.map(i=>`<button class="btn sm sec" onclick="quickAdd(this.dataset.n)" data-n="${esc(i.name)}">${esc(i.name)}</button>`).join('')}</div>`:''}</div>`;
   return h;
@@ -273,11 +319,11 @@ function renderSnap(){
 const iv=(it,k)=>num(it.base[k])*it.mult;
 function renderDraft(){
   const d=draft,tot=Object.fromEntries(NK.map(k=>[k,d.items.reduce((a,it)=>a+iv(it,k),0)]));
-  let h=`<div class="card">${d.photo?`<img src="${d.photo}" alt="" style="width:100%;max-height:220px;object-fit:cover;border-radius:10px;margin-bottom:8px">`:''}${d.note?`<div class="alert ${d.err?'warn':'info'}">${esc(d.note)}</div>`:''}<div class="muted">AI 估算僅供參考，份量不對可以直接調整。</div></div>`;
+  let h=`<div class="card">${d.photo?`<img src="${d.photo}" alt="" style="width:100%;max-height:220px;object-fit:cover;border-radius:10px;margin-bottom:8px">`:''}${d.note?`<div class="alert ${d.err?'warn':'info'}">${esc(d.note)}</div>`:''}${d.label?'<div class="alert info">營養標示以「每一份」計算。吃了幾份就選幾倍，例如整包 3 份全部吃完選「× 3」。</div>':''}<div class="muted">AI 估算僅供參考，份量不對可以直接調整。</div></div>`;
   h+=`<div class="card">${d.items.map((it,i)=>`<div class="item">
    <div class="row"><input value="${esc(it.name)}" placeholder="食物名稱" onchange="dSet(${i},'name',this.value)"><button class="btn sm danger" onclick="dDel(${i})">移除</button></div>
    ${it.portion?`<div class="muted" style="margin-top:4px">估計份量：${esc(it.portion)}</div>`:''}
-   <div class="row" style="margin-top:6px"><select style="width:auto" onchange="dSet(${i},'mult',this.value)">${[0.25,0.5,0.75,1,1.25,1.5,2,3].map(v=>`<option value="${v}" ${v==it.mult?'selected':''}>× ${v}</option>`).join('')}</select><span class="muted" style="text-align:right">${r0(iv(it,'kcal'))} 大卡 · 碳水 ${r0(iv(it,'carbs'))} g · 蛋白質 ${r0(iv(it,'protein'))} g</span></div>
+   <div class="row" style="margin-top:6px"><select style="width:auto" onchange="dSet(${i},'mult',this.value)">${[0.25,0.5,0.75,1,1.25,1.5,2,2.5,3,4,5,6,8,10].map(v=>`<option value="${v}" ${v==it.mult?'selected':''}>× ${v}</option>`).join('')}</select><span class="muted" style="text-align:right">${r0(iv(it,'kcal'))} 大卡 · 碳水 ${r0(iv(it,'carbs'))} g · 蛋白質 ${r0(iv(it,'protein'))} g</span></div>
    <details ${it.open?'open':''} ontoggle="draft.items[${i}].open=this.open"><summary>修改營養素（每 × 1 份）</summary><div class="grid2">${NUTS.map(([k,n,u])=>`<div><label class="f">${n}（${u}）</label><input type="number" inputmode="decimal" value="${r1(it.base[k])}" onchange="dBase(${i},'${k}',this.value)"></div>`).join('')}</div><label style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" style="width:auto" ${it.refined?'checked':''} onchange="dSet(${i},'refined',this.checked)"> 精緻澱粉或甜食</label></details>
   </div>`).join('')}<button class="btn sec block" style="margin-top:8px" onclick="dAdd()">＋ 新增一項</button></div>`;
   h+=`<div class="card"><h2>這一餐合計</h2><div class="grid2">${NUTS.map(([k,n,u])=>`<div class="row"><span class="muted">${n}</span><b>${r0(tot[k])} ${u}</b></div>`).join('')}</div>
@@ -293,13 +339,14 @@ function dAdd(){draft.items.push({...blank(),open:true});renderView()}
 function saveDraft(){
   const items=draft.items.filter(it=>it.name.trim());if(!items.length){toast('至少要有一項食物');return}
   db.meals.push({id:uid(),date:draft.date||today(),ts:Date.now(),mealType:draft.mealType,photo:draft.photo,items:items.map(it=>({name:it.name.trim(),portion:it.portion,refined:it.refined,mult:it.mult,base:it.base,...Object.fromEntries(NK.map(k=>[k,r1(iv(it,k))]))}))});
-  draft=null;save();toast('已記錄');go('home');
+  const sd=draft.date||today();draft=null;snapDate=today();snapMeal=null;save();toast('已記錄');if(sd!==today()){logDate=sd;go('log')}else go('home');
 }
 
 /* ---------- 飲食紀錄 ---------- */
 function renderLog(){
   const d=logDate,t=dayTotals(d),T=db.settings.targets;
   let h=`<div class="card"><div class="row"><button class="btn sm sec" onclick="logDate=addDays(logDate,-1);renderView()" aria-label="前一天">‹</button><b>${md(d)}</b><button class="btn sm sec" onclick="logDate=addDays(logDate,1);renderView()" aria-label="後一天" ${d>=today()?'disabled':''}>›</button></div>
+  <button class="btn sec block" style="margin-top:10px" onclick="snapDate=logDate;snapMeal=null;draft=null;go('snap')">＋ 補記這一天的餐點</button>
   <div class="grid2" style="margin-top:12px">${NUTS.map(([k,n,u])=>`<div class="row"><span class="muted">${n}</span><b class="${status(k,t[k])==='bad'?'red':''}">${r0(t[k])} ${u}</b></div>`).join('')}<div class="row"><span class="muted">啤酒</span><b>${t.cans} 罐</b></div><div class="row"><span class="muted">喝水</span><b>${db.water[d]||0} ml</b></div></div></div>`;
   const meals=db.meals.filter(m=>m.date===d).sort((a,b)=>MEALS.indexOf(a.mealType)-MEALS.indexOf(b.mealType)||a.ts-b.ts);
   h+=`<div class="card"><h2>餐點</h2>${meals.length?meals.map(mealRow).join(''):'<div class="muted">這天沒有紀錄</div>'}</div>`;
@@ -311,9 +358,9 @@ function renderLog(){
 }
 
 /* ---------- 身體數據 ---------- */
-const BTYPES={weight:'體重／體脂',waist:'腰圍',bp:'血壓',glucose:'血糖',sleep:'睡眠',exercise:'運動'};
-const METRICS={weight:'體重',fat:'體脂',waist:'腰圍',bp:'血壓',glucose:'血糖',sleep:'睡眠',exercise:'運動'};
-function bodyDesc(e){const v=e.v;switch(e.type){case'weight':return`體重 ${v.weight} kg${v.fat?`，體脂 ${v.fat}%`:''}`;case'waist':return`腰圍 ${v.waist} cm`;case'bp':return`血壓 ${v.sys}/${v.dia}${v.pulse?`，脈搏 ${v.pulse}`:''}`;case'glucose':return`血糖 ${v.value} mg/dl（${v.when}）`;case'sleep':return`睡眠 ${v.hours} 小時（${v.bed}–${v.wake}），品質 ${v.quality}/5`;case'exercise':return`${v.kind} ${v.minutes} 分鐘，約 ${v.kcal} 大卡`}}
+const BTYPES={weight:'體重／體脂',waist:'腰圍',bp:'血壓',glucose:'血糖',sleep:'睡眠',exercise:'運動',steps:'步數',hr:'心率'};
+const METRICS={weight:'體重',fat:'體脂',waist:'腰圍',bp:'血壓',glucose:'血糖',sleep:'睡眠',exercise:'運動',steps:'步數',hr:'心率'};
+function bodyDesc(e){const v=e.v;switch(e.type){case'weight':return`體重 ${v.weight} kg${v.fat?`，體脂 ${v.fat}%`:''}`;case'waist':return`腰圍 ${v.waist} cm`;case'bp':return`血壓 ${v.sys}/${v.dia}${v.pulse?`，脈搏 ${v.pulse}`:''}`;case'glucose':return`血糖 ${v.value} mg/dl（${v.when}）`;case'sleep':return`睡眠 ${v.hours} 小時${v.bed?`（${v.bed}–${v.wake}）`:''}${v.quality?`，品質 ${v.quality}/5`:''}`;case'exercise':return`${v.kind}${v.minutes?` ${v.minutes} 分鐘`:''}，約 ${v.kcal} 大卡`;case'steps':return`步數 ${v.steps.toLocaleString()} 步`;case'hr':return`靜止心率 ${v.bpm} 下／分`}}
 function series(m){
   const E=t=>db.body.filter(e=>e.type===t).sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:a.ts-b.ts);
   const S=db.settings;
@@ -324,6 +371,8 @@ function series(m){
     case'bp':return{s:[{n:'收縮壓',p:E('bp').map(e=>({x:e.date,y:e.v.sys}))},{n:'舒張壓',p:E('bp').map(e=>({x:e.date,y:e.v.dia}))}],t:[130,80],u:'mmHg'};
     case'glucose':return{s:[{n:'空腹血糖',p:E('glucose').filter(e=>e.v.when==='空腹').map(e=>({x:e.date,y:e.v.value}))}],t:[100],u:'mg/dl'};
     case'sleep':return{s:[{n:'睡眠',p:E('sleep').map(e=>({x:e.date,y:e.v.hours}))}],t:[7],u:'小時'};
+    case'steps':return{s:[{n:'步數',p:E('steps').map(e=>({x:e.date,y:e.v.steps}))}],t:[7000],u:'步'};
+    case'hr':return{s:[{n:'靜止心率',p:E('hr').map(e=>({x:e.date,y:e.v.bpm}))}],t:[],u:'下／分'};
     case'exercise':{const by={};E('exercise').forEach(e=>by[e.date]=(by[e.date]||0)+e.v.minutes);return{s:[{n:'運動',p:Object.keys(by).sort().map(x=>({x,y:by[x]}))}],t:[30],u:'分鐘'}}
   }
 }
@@ -337,17 +386,18 @@ function lineChart({s,t,u}){
   t.forEach(v=>g+=`<line x1="${L}" x2="${W-R}" y1="${Y(v)}" y2="${Y(v)}" style="stroke:var(--ok)" stroke-width="1" stroke-dasharray="4 3"/>`);
   s.forEach((x,si)=>{const p=x.p.filter(q=>q.x in xi);g+=`<polyline fill="none" style="stroke:${cols[si]}" stroke-width="2" points="${p.map(q=>X(xi[q.x])+','+Y(q.y)).join(' ')}"/>`+p.map(q=>`<circle cx="${X(xi[q.x])}" cy="${Y(q.y)}" r="2.5" style="fill:${cols[si]}"/>`).join('')});
   g+=`<text x="${L}" y="${H-6}">${dates[0].slice(5)}</text><text x="${W-R}" y="${H-6}" text-anchor="end">${dates[dates.length-1].slice(5)}</text>`;
-  const legend=s.map((x,i)=>`<span style="color:${cols[i]}">● ${x.n}</span>`).join('　')+`　<span style="color:var(--ok)">--- 目標 ${t.join(' / ')} ${u}</span>`;
+  const legend=s.map((x,i)=>`<span style="color:${cols[i]}">● ${x.n}</span>`).join('　')+(t.length?`　<span style="color:var(--ok)">--- 目標 ${t.join(' / ')} ${u}</span>`:'');
   return`<svg class="chart" viewBox="0 0 ${W} ${H}" width="100%">${g}</svg><div class="muted">${legend}</div>`;
 }
 function renderBody(){
-  const S=db.settings,w=latestWeight(),bmi=w/((S.height/100)**2),lost=S.startWeight-w,need=S.startWeight-S.goals[1];
-  let h=`<div class="card"><div class="row"><div><div class="muted">目前體重</div><div class="big">${r1(w)}<span class="muted" style="font-size:15px;font-weight:400"> kg　BMI ${r1(bmi)}</span></div></div><div style="text-align:right"><div class="muted">已減</div><div style="font-size:22px;font-weight:700;color:var(--ok)">${r1(Math.max(0,lost))} kg</div></div></div>
+  const S=db.settings,w=latestWeight(),bmi=S.height?w/((S.height/100)**2):0,lost=S.startWeight?S.startWeight-w:0,need=(S.startWeight-S.goals[1])||1;
+  let h=`<div class="card"><div class="row"><div><div class="muted">目前體重</div><div class="big">${r1(w)}<span class="muted" style="font-size:15px;font-weight:400"> kg${bmi?`　BMI ${r1(bmi)}`:''}</span></div></div><div style="text-align:right"><div class="muted">已減</div><div style="font-size:22px;font-weight:700;color:var(--ok)">${r1(Math.max(0,lost))} kg</div></div></div>
   <div class="bar"><i style="width:${Math.max(0,Math.min(100,lost/need*100))}%;background:var(--ok)"></i></div><div class="muted">起始 ${S.startWeight} kg → 第一階段 ${S.goals[0]} kg → 第二階段 ${S.goals[1]} kg</div></div>`;
   h+=`<div class="card"><h2>新增紀錄</h2><div class="grid3">${Object.entries(BTYPES).map(([k,n])=>`<button class="btn sec" onclick="bodyForm('${k}')">${n}</button>`).join('')}</div></div>`;
+  h+=`<div class="card"><div class="row"><h2 style="margin:0">從手錶／手環匯入</h2><button class="btn sm sec" onclick="importHelp()">設定說明</button></div><div class="grid2" style="margin-top:10px"><button class="btn" onclick="importClipboard()">從剪貼簿匯入</button><button class="btn sec" onclick="importPaste()">貼上或選檔案</button></div><div class="muted" style="margin-top:6px">Apple Watch、小米手環的數據先同步到 iPhone「健康」App，再用「捷徑」複製進來。</div></div>`;
   h+=`<div class="card"><div class="seg" style="margin-bottom:10px">${Object.entries(METRICS).map(([k,n])=>`<button class="${metric===k?'on':''}" onclick="metric='${k}';renderView()">${n}</button>`).join('')}</div>${lineChart(series(metric))}</div>`;
   const rec=[...db.body].sort((a,b)=>(b.date+b.ts)>(a.date+a.ts)?1:-1).slice(0,20);
-  h+=`<div class="card"><h2>最近紀錄</h2>${rec.length?rec.map(e=>`<div class="item row"><div><div>${esc(bodyDesc(e))}</div><div class="muted">${md(e.date)}</div></div><button class="btn sm danger" onclick="delBody('${e.id}')">刪除</button></div>`).join(''):'<div class="muted">還沒有紀錄</div>'}</div>`;
+  h+=`<div class="card"><h2>最近紀錄</h2>${rec.length?rec.map(e=>`<div class="item row"><div><div>${esc(bodyDesc(e))}</div><div class="muted">${md(e.date)}${e.src?`　來源：${esc(e.src)}`:''}</div></div><button class="btn sm danger" onclick="delBody('${e.id}')">刪除</button></div>`).join(''):'<div class="muted">還沒有紀錄</div>'}</div>`;
   return h;
 }
 function fld(id,label,type,val,attrs){return`<div><label class="f" for="${id}">${label}</label><input id="${id}" type="${type}" value="${val??''}" ${type==='number'?'inputmode="decimal"':''} ${attrs||''}></div>`}
@@ -358,6 +408,8 @@ function bodyForm(type){
   if(type==='bp')f=`<div class="grid3">${fld('f_sys','收縮壓','number','')}${fld('f_dia','舒張壓','number','')}${fld('f_pulse','脈搏','number','')}</div>`;
   if(type==='glucose')f=`<div class="grid2">${fld('f_value','血糖（mg/dl）','number','')}<div><label class="f">測量時機</label><select id="f_when">${['空腹','飯前','飯後 2 小時','睡前'].map(x=>`<option>${x}</option>`).join('')}</select></div></div>`;
   if(type==='sleep')f=`<div class="grid2">${fld('f_bed','就寢時間','time','23:30')}${fld('f_wake','起床時間','time','07:00')}</div><label class="f">睡眠品質（1 很差 – 5 很好）</label><select id="f_q">${[1,2,3,4,5].map(x=>`<option ${x===3?'selected':''}>${x}</option>`).join('')}</select>`;
+  if(type==='steps')f=fld('f_steps','步數','number','');
+  if(type==='hr')f=fld('f_bpm','靜止心率（下／分）','number','');
   if(type==='exercise')f=`<div class="grid2"><div><label class="f">運動類型</label><select id="f_kind" oninput="exPrev()">${Object.keys(EXERCISE).map(x=>`<option>${x}</option>`).join('')}</select></div>${fld('f_min','時間（分鐘）','number','30','oninput="exPrev()"')}</div><div class="muted" id="exp" style="margin-top:6px"></div><div class="muted">運動消耗只做紀錄，不會加回每日熱量額度。</div>`;
   openSheet(`<h2 style="margin:0 0 8px;font-size:18px">新增${BTYPES[type]}</h2>${f}${fld('f_date','日期','date',today())}<div class="grid2" style="margin-top:14px"><button class="btn sec" onclick="closeSheet()">取消</button><button class="btn" onclick="saveBody('${type}')">儲存</button></div>`);
   if(type==='exercise')exPrev();
@@ -371,26 +423,105 @@ function saveBody(type){
   if(type==='glucose'){if(!n('f_value'))return toast('請輸入血糖');v={value:n('f_value'),when:g('f_when')}}
   if(type==='sleep'){const[bh,bm]=g('f_bed').split(':').map(Number),[wh,wm]=g('f_wake').split(':').map(Number);const mins=((wh*60+wm)-(bh*60+bm)+1440)%1440;v={bed:g('f_bed'),wake:g('f_wake'),hours:r1(mins/60),quality:n('f_q')}}
   if(type==='exercise'){if(!n('f_min'))return toast('請輸入時間');const k=g('f_kind');v={kind:k,minutes:n('f_min'),kcal:r0(EXERCISE[k]*latestWeight()*n('f_min')/60)}}
+  if(type==='steps'){if(!n('f_steps'))return toast('請輸入步數');v={steps:r0(n('f_steps'))}}
+  if(type==='hr'){if(!n('f_bpm'))return toast('請輸入心率');v={bpm:r0(n('f_bpm'))}}
   db.body.push({id:uid(),type,date:g('f_date')||today(),ts:Date.now(),v});save();closeSheet();toast('已儲存');renderView();
 }
+/* ---------- 外部裝置匯入 ----------
+   通用格式（給 Apple 健康捷徑、小米、其他裝置或未來的轉接程式使用）：
+   1) 文字：每行 key=value，例如 date=2026-10-11 / weight=98.5 / steps=8234 / source=AppleHealth
+      出現新的 date= 行就開始新的一天。
+   2) JSON：{"format":"dietapp-health","version":1,"source":"裝置名稱",
+            "records":[{"date":"2026-10-11","weight":98.5,"steps":8234},
+                       {"date":"2026-10-11","type":"hr","value":62}]}
+   支援欄位：weight fat waist sys dia pulse glucose glucose_when sleep steps hr exercise_min active_kcal exercise_kind */
+const IMPORT_KEYS={weight:'weight','體重':'weight',fat:'fat',bodyfat:'fat','體脂':'fat',waist:'waist','腰圍':'waist',sys:'sys',systolic:'sys','收縮壓':'sys',dia:'dia',diastolic:'dia','舒張壓':'dia',pulse:'pulse','脈搏':'pulse',glucose:'glucose','血糖':'glucose',glucose_when:'gwhen',sleep:'sleep',sleep_hours:'sleep','睡眠':'sleep',steps:'steps','步數':'steps',hr:'hr',resting_hr:'hr','心率':'hr','靜止心率':'hr',exercise_min:'exmin','運動分鐘':'exmin',active_kcal:'exkcal','活動熱量':'exkcal',exercise_kind:'exkind'};
+const RANGES={weight:[20,300],fat:[3,70],waist:[40,200],sys:[60,260],dia:[30,160],pulse:[30,220],glucose:[30,600],sleep:[0,20],steps:[0,150000],hr:[25,200],exmin:[0,1000],exkcal:[0,10000]};
+function normDate(d){if(!d)return today();d=String(d).trim().replace(/[\/.]/g,'-');const m=d.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);return m?`${m[1]}-${pad(+m[2])}-${pad(+m[3])}`:null}
+function impNum(k,v){if(k==='gwhen'||k==='exkind')return String(v).trim();let s=String(v).replace(/,/g,'').trim();if(k==='sleep'){const hm=s.match(/^(\d+):(\d{1,2})/);if(hm)return +hm[1]+ +hm[2]/60}const m=s.match(/-?\d+(\.\d+)?/);if(!m)return null;const n=parseFloat(m[0]);const r=RANGES[k];return r&&(n<r[0]||n>r[1])?null:n}
+function parseImport(text){
+  text=String(text||'').trim();if(!text)throw new Error('沒有資料');
+  const groups=[];let src='匯入';
+  if(/^[\[{]/.test(text)){
+    let j=JSON.parse(text);if(!Array.isArray(j)){src=j.source||src;j=j.records||[j]}
+    j.forEach(r=>{const kv={...r};delete kv.date;delete kv.source;if(r.type){kv[r.type]=r.value;delete kv.type;delete kv.value}groups.push({date:r.date,src:r.source||src,kv})});
+  }else{
+    let cur=null;
+    text.split(/\r?\n/).forEach(line=>{const m=line.match(/^\s*([^=:：]+?)\s*[=:：]\s*(.+?)\s*$/);if(!m)return;const k=m[1].toLowerCase(),v=m[2];
+      if(k==='date'||k==='日期'){cur={date:v,kv:{}};groups.push(cur);return}
+      if(k==='source'||k==='來源'){src=v;return}
+      if(!cur){cur={date:null,kv:{}};groups.push(cur)}cur.kv[k]=v});
+    groups.forEach(g=>g.src=g.src||src);
+  }
+  const recs=[];let skipped=0;
+  groups.forEach(g=>{
+    const date=normDate(g.date);if(!date||date>today()){skipped++;return}
+    const k={};Object.entries(g.kv).forEach(([key,val])=>{const nk=IMPORT_KEYS[String(key).toLowerCase().trim()];if(!nk)return;const n=impNum(nk,val);if(n===null||n===''){skipped++;return}k[nk]=n});
+    const mk=(type,v)=>recs.push({id:uid(),type,date,ts:Date.now(),v,src:g.src});
+    if(k.weight)mk('weight',k.fat?{weight:r1(k.weight),fat:r1(k.fat)}:{weight:r1(k.weight)});
+    if(k.waist)mk('waist',{waist:r1(k.waist)});
+    if(k.sys&&k.dia)mk('bp',k.pulse?{sys:r0(k.sys),dia:r0(k.dia),pulse:r0(k.pulse)}:{sys:r0(k.sys),dia:r0(k.dia)});
+    if(k.glucose)mk('glucose',{value:r0(k.glucose),when:k.gwhen||'空腹'});
+    if(k.sleep)mk('sleep',{hours:r1(k.sleep),bed:'',wake:'',quality:0});
+    if(k.steps)mk('steps',{steps:r0(k.steps)});
+    if(k.hr)mk('hr',{bpm:r0(k.hr)});
+    if(k.exmin||k.exkcal)mk('exercise',{kind:k.exkind||'運動（匯入）',minutes:r0(k.exmin||0),kcal:r0(k.exkcal||(k.exmin?4.0*latestWeight()*k.exmin/60:0))});
+  });
+  return{recs,skipped};
+}
+async function importClipboard(){
+  try{if(!navigator.clipboard||!navigator.clipboard.readText)throw 0;const t=await navigator.clipboard.readText();previewImport(t)}
+  catch(e){importPaste();toast('無法自動讀取剪貼簿，請手動貼上')}
+}
+function importPaste(){openSheet(`<h2 style="margin:0 0 8px;font-size:18px">匯入健康數據</h2><textarea id="impText" style="min-height:140px" placeholder="date=2026-10-11&#10;weight=98.5&#10;steps=8234&#10;source=AppleHealth"></textarea><label class="btn sec block" style="margin-top:8px">選擇檔案（.txt／.json）<input class="hidefile" type="file" accept=".txt,.json,text/plain,application/json" onchange="impFile(this)"></label><div class="grid2" style="margin-top:12px"><button class="btn sec" onclick="closeSheet()">取消</button><button class="btn" onclick="previewImport($('#impText').value)">下一步</button></div>`)}
+function impFile(input){const f=input.files[0];if(!f)return;const r=new FileReader();r.onload=()=>previewImport(r.result);r.readAsText(f)}
+function previewImport(text){
+  let res;try{res=parseImport(text)}catch(e){toast('資料格式無法辨識');return}
+  if(!res.recs.length){toast('找不到可以匯入的數據');return}
+  pendingImport=res.recs;
+  openSheet(`<h2 style="margin:0 0 8px;font-size:18px">確認匯入 ${res.recs.length} 筆</h2>${res.recs.map(e=>`<div class="item"><div>${esc(bodyDesc(e))}</div><div class="muted">${md(e.date)}　來源：${esc(e.src)}</div></div>`).join('')}${res.skipped?`<div class="muted" style="margin-top:6px">有 ${res.skipped} 個欄位格式不正確或超出合理範圍，已略過。</div>`:''}<div class="muted" style="margin-top:6px">同一天、同一來源、同一項目的舊資料會被取代，不會重複。</div><div class="grid2" style="margin-top:12px"><button class="btn sec" onclick="closeSheet()">取消</button><button class="btn" onclick="doImport()">匯入</button></div>`);
+}
+function doImport(){
+  if(!pendingImport)return;
+  pendingImport.forEach(r=>{db.body=db.body.filter(e=>!(e.src&&e.src===r.src&&e.type===r.type&&e.date===r.date));db.body.push(r)});
+  const n=pendingImport.length;pendingImport=null;save();closeSheet();toast(`已匯入 ${n} 筆`);renderView();
+}
+function importHelp(){openSheet(`<h2 style="margin:0 0 8px;font-size:18px">連接手錶與手環</h2>
+<div class="muted">網頁 App 無法直接讀取 Apple 健康或藍牙裝置，所以透過 iPhone 的「健康」和「捷徑」轉送數據。</div>
+<h2 style="margin:14px 0 6px">1. 讓數據進到「健康」App</h2>
+<div>Apple Watch：會自動同步，不用設定。<br>小米手環：打開「小米運動健康」→「我的」→「第三方數據」→ 開啟「健康」，勾選要同步的項目。</div>
+<h2 style="margin:14px 0 6px">2. 用「捷徑」複製數據</h2>
+<div>在「捷徑」App 建立一個捷徑，從「健康」取出今天的數據，組成下面的文字，最後加上「拷貝到剪貼板」。</div>
+<pre style="background:var(--card);border-radius:10px;padding:10px;font-size:13px;white-space:pre-wrap">date=2026-10-11
+steps=8234
+weight=98.5
+hr=62
+active_kcal=420
+sleep=6.8
+source=AppleHealth</pre>
+<h2 style="margin:14px 0 6px">3. 匯入</h2>
+<div>執行捷徑後打開這個 App，到「身體數據」按「從剪貼簿匯入」。</div>
+<h2 style="margin:14px 0 6px">其他裝置</h2>
+<div class="muted">任何裝置或程式只要輸出上面的文字格式，或 JSON 格式 {"source":"裝置名","records":[{"date":"…","weight":…}]}，都可以用「貼上或選檔案」匯入。支援欄位：weight、fat、waist、sys、dia、pulse、glucose、sleep、steps、hr、exercise_min、active_kcal。</div>
+<button class="btn block" style="margin-top:14px" onclick="closeSheet()">知道了</button>`)}
 function delBody(id){if(!confirm('刪除這筆紀錄？'))return;db.body=db.body.filter(e=>e.id!==id);save();renderView()}
 
 /* ---------- 設定 ---------- */
 function renderSettings(){
   const S=db.settings,T=S.targets,R=S.reminders;
   let h=`<div class="card"><h2>Claude API</h2><div class="muted">拍照辨識需要 API 金鑰，請到 console.anthropic.com 申請。金鑰只存在這支手機。</div>${fld('s_key','API 金鑰','password',esc(S.apiKey),'autocomplete="off" placeholder="sk-ant-..."')}${fld('s_model','模型','text',esc(S.model))}<div class="grid2" style="margin-top:10px"><button class="btn sec" onclick="testKey()">測試連線</button><button class="btn" onclick="saveKey()">儲存</button></div></div>`;
+  h+=profileCard(false);
   h+=alcoholPlanCard(false);
   h+=`<div class="card"><h2>每日營養標準</h2><div class="grid2">${fld('t_kcal','熱量上限（大卡）','number',T.kcal)}${fld('t_cmin','碳水最低（g）','number',T.carbsMin)}${fld('t_p0','蛋白質最低（g）','number',T.protein[0])}${fld('t_p1','蛋白質最高（g）','number',T.protein[1])}${fld('t_c0','碳水目標下限（g）','number',T.carbs[0])}${fld('t_c1','碳水目標上限（g）','number',T.carbs[1])}${fld('t_f0','脂肪最低（g）','number',T.fat[0])}${fld('t_f1','脂肪最高（g）','number',T.fat[1])}${fld('t_sat','飽和脂肪上限（g）','number',T.satfat)}${fld('t_sug','添加糖上限（g）','number',T.sugar)}${fld('t_fib','纖維最低（g）','number',T.fiber)}${fld('t_na','鈉上限（mg）','number',T.sodium)}</div>
-  <h2 style="margin-top:14px">體重目標</h2><div class="grid3">${fld('g_start','起始（kg）','number',S.startWeight)}${fld('g_1','第一階段','number',S.goals[0])}${fld('g_2','第二階段','number',S.goals[1])}</div>${fld('g_h','身高（cm）','number',S.height)}
   <button class="btn block" style="margin-top:12px" onclick="saveTargets()">儲存標準</button><button class="btn sec block" style="margin-top:8px" onclick="resetTargets()">恢復預設標準</button></div>`;
   h+=`<div class="card"><h2>提醒時間</h2><div class="muted">這個時間過後還沒記錄，打開 App 時會在首頁提醒。</div><div class="grid2">${fld('r_b','早餐','time',R.breakfast)}${fld('r_l','午餐','time',R.lunch)}${fld('r_d','晚餐','time',R.dinner)}${fld('r_w','量體重','time',R.weigh)}</div><button class="btn block" style="margin-top:12px" onclick="saveRem()">儲存提醒</button></div>`;
-  h+=`<div class="card"><h2>資料備份</h2><div class="muted">資料只存在這支手機的瀏覽器裡，建議每週匯出一次備份。</div><div class="grid2" style="margin-top:10px"><button class="btn sec" onclick="exportData()">匯出備份</button><label class="btn sec">匯入備份<input class="hidefile" type="file" accept="application/json,.json" onchange="importData(this)"></label></div><button class="btn danger block" style="margin-top:8px" onclick="clearAll()">清除所有資料</button></div><div class="muted" style="text-align:center;margin:8px 0">飲食控制 v1.0　營養估算僅供參考，用藥與飲食調整請依醫囑。</div>`;
+  h+=`<div class="card"><h2>資料備份</h2><div class="muted">資料只存在這支手機的瀏覽器裡，建議每週匯出一次備份。</div><div class="grid2" style="margin-top:10px"><button class="btn sec" onclick="exportData()">匯出備份</button><label class="btn sec">匯入備份<input class="hidefile" type="file" accept="application/json,.json" onchange="importData(this)"></label></div><button class="btn danger block" style="margin-top:8px" onclick="clearAll()">清除所有資料</button></div><div class="muted" style="text-align:center;margin:8px 0">飲食控制 v1.2　營養估算僅供參考，用藥與飲食調整請依醫囑。</div>`;
   return h;
 }
 function saveKey(){db.settings.apiKey=$('#s_key').value.trim();db.settings.model=$('#s_model').value.trim()||DEFAULTS.model;save();toast('已儲存')}
 async function testKey(){saveKey();toast('測試中…');try{await callRaw([{type:'text',text:'請只回覆 OK'}],10);toast('連線成功')}catch(e){alert('連線失敗：'+e.message)}}
-function saveTargets(){const n=id=>num($('#'+id).value),S=db.settings;S.targets={kcal:n('t_kcal'),carbsMin:n('t_cmin'),protein:[n('t_p0'),n('t_p1')],carbs:[n('t_c0'),n('t_c1')],fat:[n('t_f0'),n('t_f1')],satfat:n('t_sat'),sugar:n('t_sug'),fiber:n('t_fib'),sodium:n('t_na')};S.startWeight=n('g_start');S.goals=[n('g_1'),n('g_2')];S.height=n('g_h');save();toast('已儲存標準')}
-function resetTargets(){if(!confirm('恢復預設的營養標準與體重目標？'))return;Object.assign(db.settings,{targets:structuredClone(DEFAULTS.targets),startWeight:DEFAULTS.startWeight,goals:[...DEFAULTS.goals],height:DEFAULTS.height});save();renderView();toast('已恢復預設')}
+function saveTargets(){const n=id=>num($('#'+id).value),S=db.settings;S.targets={kcal:n('t_kcal'),carbsMin:n('t_cmin'),protein:[n('t_p0'),n('t_p1')],carbs:[n('t_c0'),n('t_c1')],fat:[n('t_f0'),n('t_f1')],satfat:n('t_sat'),sugar:n('t_sug'),fiber:n('t_fib'),sodium:n('t_na')};save();toast('已儲存標準')}
+function resetTargets(){if(!confirm('恢復預設的營養標準？'))return;db.settings.targets=structuredClone(DEFAULTS.targets);save();renderView();toast('已恢復預設')}
 function saveRem(){db.settings.reminders={breakfast:$('#r_b').value,lunch:$('#r_l').value,dinner:$('#r_d').value,weigh:$('#r_w').value};save();toast('已儲存提醒')}
 function exportData(){const b=new Blob([JSON.stringify({...db,settings:{...db.settings,apiKey:''}},null,1)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`飲食控制備份-${today()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}
 function importData(input){const f=input.files[0];input.value='';if(!f)return;const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(!Array.isArray(d.meals))throw 0;if(!confirm('匯入會取代目前所有資料，確定嗎？'))return;const key=db.settings.apiKey;db=migrate(d);if(!db.settings.apiKey)db.settings.apiKey=key;save();toast('匯入完成');renderView()}catch(e){alert('檔案格式不正確')}};r.readAsText(f)}
