@@ -220,7 +220,7 @@ function weeklyWeightCard(){
 }
 function mealRow(m){
   const k=m.items.reduce((a,i)=>a+num(i.kcal),0),c=m.items.reduce((a,i)=>a+num(i.carbs),0);
-  return`<div class="item"><div class="row" style="align-items:flex-start">${m.photo?`<img class="thumb" src="${m.photo}" alt="">`:''}<div style="flex:1;min-width:0"><b>${esc(m.mealType)}</b> <span class="muted">${r0(k)} 大卡 · 碳水 ${r0(c)} g</span><div class="muted">${esc(m.items.map(i=>i.name).join('、'))}</div></div><button class="btn sm danger" onclick="delMeal('${m.id}')">刪除</button></div></div>`;
+  return`<div class="item"><div class="row" style="align-items:flex-start">${m.photo?`<img class="thumb" src="${m.photo}" alt="">`:''}<div style="flex:1;min-width:0"><b>${esc(m.mealType)}</b> <span class="muted">${r0(k)} 大卡 · 碳水 ${r0(c)} g</span><div class="muted">${esc(m.items.map(i=>i.name).join('、'))}</div>${k===0?`<button class="btn sm" style="margin-top:6px" onclick="reestimateMeal('${m.id}')">沒有熱量資料，按此用 AI 估算</button>`:''}</div><button class="btn sm danger" onclick="delMeal('${m.id}')">刪除</button></div></div>`;
 }
 function addBeer(n){
   const d=today();
@@ -301,6 +301,26 @@ async function estimateText(){
   catch(e){draft={photo:null,items:[blank()],note:'估算失敗：'+e.message,err:true,...ctx()}}
   busy=false;renderView();
 }
+const zeroItem=it=>it.name.trim()&&NK.every(k=>!num(it.base?it.base[k]:it[k]));
+async function estimateNames(txt){
+  const res=await callJSON([{type:'text',text:role()+`\n使用者手動輸入了以下食物：「${txt}」。份量以描述為準，不明確時用台灣常見份量；每一樣食物各回傳一個 item。\n`+FORMAT}]);
+  const items=(res.items||[]).map(norm);if(!items.length)throw new Error('AI 沒有辨識出食物');return{items,note:res.note||''};
+}
+async function aiItem(i){
+  if(!db.settings.apiKey){toast('請先到「標準與提醒」輸入 API 金鑰');return}
+  if(busy)return;busy=true;const keep=draft;loadingView('AI 估算中…');
+  try{const r=await estimateNames(keep.items[i].name);keep.items.splice(i,1,...r.items);if(r.note)keep.note=r.note;keep.err=false}
+  catch(e){toast('估算失敗：'+e.message)}
+  draft=keep;busy=false;renderView();
+}
+async function reestimateMeal(id){
+  const m=db.meals.find(x=>x.id===id);if(!m)return;
+  if(!db.settings.apiKey){toast('請先到「標準與提醒」輸入 API 金鑰');return}
+  if(busy)return;busy=true;toast('AI 估算中…');
+  try{const r=await estimateNames(m.items.map(i=>i.name).join('、'));m.items=r.items.map(it=>({name:it.name,portion:it.portion,refined:it.refined,mult:1,base:it.base,...Object.fromEntries(NK.map(k=>[k,r1(it.base[k])]))}));save();toast('已重新估算')}
+  catch(e){toast('估算失敗：'+e.message)}
+  busy=false;renderView();
+}
 function manual(){draft={photo:null,items:[blank()],note:'',...ctx()};renderView()}
 function recentFoods(){const seen=new Set,out=[];[...db.meals].sort((a,b)=>b.ts-a.ts).forEach(m=>m.items.forEach(i=>{if(i.name&&!seen.has(i.name)&&out.length<12){seen.add(i.name);out.push(i)}}));return out}
 function quickAdd(name){const it=recentFoods().find(i=>i.name===name);if(!it)return;const n=norm({name:it.name,portion:it.portion,refined:it.refined,...(it.base||it)});if(!draft)draft={photo:null,items:[],note:'',...ctx()};draft.items.push(n);renderView()}
@@ -319,10 +339,11 @@ function renderSnap(){
 const iv=(it,k)=>num(it.base[k])*it.mult;
 function renderDraft(){
   const d=draft,tot=Object.fromEntries(NK.map(k=>[k,d.items.reduce((a,it)=>a+iv(it,k),0)]));
-  let h=`<div class="card">${d.photo?`<img src="${d.photo}" alt="" style="width:100%;max-height:220px;object-fit:cover;border-radius:10px;margin-bottom:8px">`:''}${d.note?`<div class="alert ${d.err?'warn':'info'}">${esc(d.note)}</div>`:''}${d.label?'<div class="alert info">營養標示以「每一份」計算。吃了幾份就選幾倍，例如整包 3 份全部吃完選「× 3」。</div>':''}<div class="muted">AI 估算僅供參考，份量不對可以直接調整。</div></div>`;
+  let h=`<div class="card">${d.photo?`<img src="${d.photo}" alt="" style="width:100%;max-height:220px;object-fit:cover;border-radius:10px;margin-bottom:8px">`:''}${d.note?`<div class="alert ${d.err?'warn':'info'}">${esc(d.note)}</div>`:''}${d.label?'<div class="alert info">營養標示以「每一份」計算。吃了幾份就選幾倍，例如整包 3 份全部吃完選「× 3」。</div>':''}<div class="muted">AI 估算僅供參考，份量不對可以直接調整。手動輸入時，填好食物名稱和份量（例如「荷包蛋 2 顆」）後，按「AI 估算」就會算出營養。</div></div>`;
   h+=`<div class="card">${d.items.map((it,i)=>`<div class="item">
    <div class="row"><input value="${esc(it.name)}" placeholder="食物名稱" onchange="dSet(${i},'name',this.value)"><button class="btn sm danger" onclick="dDel(${i})">移除</button></div>
    ${it.portion?`<div class="muted" style="margin-top:4px">估計份量：${esc(it.portion)}</div>`:''}
+   ${zeroItem(it)?`<button class="btn sm block" style="margin-top:6px" onclick="aiItem(${i})">AI 估算「${esc(it.name.slice(0,14))}${it.name.length>14?'…':''}」的熱量與營養</button>`:''}
    <div class="row" style="margin-top:6px"><select style="width:auto" onchange="dSet(${i},'mult',this.value)">${[0.25,0.5,0.75,1,1.25,1.5,2,2.5,3,4,5,6,8,10].map(v=>`<option value="${v}" ${v==it.mult?'selected':''}>× ${v}</option>`).join('')}</select><span class="muted" style="text-align:right">${r0(iv(it,'kcal'))} 大卡 · 碳水 ${r0(iv(it,'carbs'))} g · 蛋白質 ${r0(iv(it,'protein'))} g</span></div>
    <details ${it.open?'open':''} ontoggle="draft.items[${i}].open=this.open"><summary>修改營養素（每 × 1 份）</summary><div class="grid2">${NUTS.map(([k,n,u])=>`<div><label class="f">${n}（${u}）</label><input type="number" inputmode="decimal" value="${r1(it.base[k])}" onchange="dBase(${i},'${k}',this.value)"></div>`).join('')}</div><label style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" style="width:auto" ${it.refined?'checked':''} onchange="dSet(${i},'refined',this.checked)"> 精緻澱粉或甜食</label></details>
   </div>`).join('')}<button class="btn sec block" style="margin-top:8px" onclick="dAdd()">＋ 新增一項</button></div>`;
@@ -336,8 +357,18 @@ function dSet(i,k,v){const it=draft.items[i];if(k==='mult')it.mult=num(v);else i
 function dBase(i,k,v){draft.items[i].base[k]=num(v);draft.items[i].open=true;renderView()}
 function dDel(i){draft.items.splice(i,1);renderView()}
 function dAdd(){draft.items.push({...blank(),open:true});renderView()}
-function saveDraft(){
+async function saveDraft(){
   const items=draft.items.filter(it=>it.name.trim());if(!items.length){toast('至少要有一項食物');return}
+  const zeros=items.filter(zeroItem);
+  if(zeros.length){
+    if(db.settings.apiKey){
+      if(busy)return;busy=true;const keep=draft;loadingView('AI 估算中…');
+      try{const r=await estimateNames(zeros.map(z=>z.name).join('、'));keep.items=keep.items.filter(it=>it.name.trim()&&!zeroItem(it)).concat(r.items);keep.note='已用 AI 估算沒有填營養的項目，請確認份量後再按一次「儲存」。'+(r.note?' '+r.note:'');keep.err=false}
+      catch(e){keep.note='自動估算失敗：'+e.message;keep.err=true}
+      draft=keep;busy=false;renderView();window.scrollTo(0,0);return;
+    }
+    if(!confirm(`有 ${zeros.length} 項沒有熱量資料（尚未設定 API 金鑰，無法自動估算），仍要儲存嗎？`))return;
+  }
   db.meals.push({id:uid(),date:draft.date||today(),ts:Date.now(),mealType:draft.mealType,photo:draft.photo,items:items.map(it=>({name:it.name.trim(),portion:it.portion,refined:it.refined,mult:it.mult,base:it.base,...Object.fromEntries(NK.map(k=>[k,r1(iv(it,k))]))}))});
   const sd=draft.date||today();draft=null;snapDate=today();snapMeal=null;save();toast('已記錄');if(sd!==today()){logDate=sd;go('log')}else go('home');
 }
@@ -515,7 +546,7 @@ function renderSettings(){
   h+=`<div class="card"><h2>每日營養標準</h2><div class="grid2">${fld('t_kcal','熱量上限（大卡）','number',T.kcal)}${fld('t_cmin','碳水最低（g）','number',T.carbsMin)}${fld('t_p0','蛋白質最低（g）','number',T.protein[0])}${fld('t_p1','蛋白質最高（g）','number',T.protein[1])}${fld('t_c0','碳水目標下限（g）','number',T.carbs[0])}${fld('t_c1','碳水目標上限（g）','number',T.carbs[1])}${fld('t_f0','脂肪最低（g）','number',T.fat[0])}${fld('t_f1','脂肪最高（g）','number',T.fat[1])}${fld('t_sat','飽和脂肪上限（g）','number',T.satfat)}${fld('t_sug','添加糖上限（g）','number',T.sugar)}${fld('t_fib','纖維最低（g）','number',T.fiber)}${fld('t_na','鈉上限（mg）','number',T.sodium)}</div>
   <button class="btn block" style="margin-top:12px" onclick="saveTargets()">儲存標準</button><button class="btn sec block" style="margin-top:8px" onclick="resetTargets()">恢復預設標準</button></div>`;
   h+=`<div class="card"><h2>提醒時間</h2><div class="muted">這個時間過後還沒記錄，打開 App 時會在首頁提醒。</div><div class="grid2">${fld('r_b','早餐','time',R.breakfast)}${fld('r_l','午餐','time',R.lunch)}${fld('r_d','晚餐','time',R.dinner)}${fld('r_w','量體重','time',R.weigh)}</div><button class="btn block" style="margin-top:12px" onclick="saveRem()">儲存提醒</button></div>`;
-  h+=`<div class="card"><h2>資料備份</h2><div class="muted">資料只存在這支手機的瀏覽器裡，建議每週匯出一次備份。</div><div class="grid2" style="margin-top:10px"><button class="btn sec" onclick="exportData()">匯出備份</button><label class="btn sec">匯入備份<input class="hidefile" type="file" accept="application/json,.json" onchange="importData(this)"></label></div><button class="btn danger block" style="margin-top:8px" onclick="clearAll()">清除所有資料</button></div><div class="muted" style="text-align:center;margin:8px 0">飲食控制 v1.2　營養估算僅供參考，用藥與飲食調整請依醫囑。</div>`;
+  h+=`<div class="card"><h2>資料備份</h2><div class="muted">資料只存在這支手機的瀏覽器裡，建議每週匯出一次備份。</div><div class="grid2" style="margin-top:10px"><button class="btn sec" onclick="exportData()">匯出備份</button><label class="btn sec">匯入備份<input class="hidefile" type="file" accept="application/json,.json" onchange="importData(this)"></label></div><button class="btn danger block" style="margin-top:8px" onclick="clearAll()">清除所有資料</button></div><div class="muted" style="text-align:center;margin:8px 0">飲食控制 v1.2.1　營養估算僅供參考，用藥與飲食調整請依醫囑。</div>`;
   return h;
 }
 function saveKey(){db.settings.apiKey=$('#s_key').value.trim();db.settings.model=$('#s_model').value.trim()||DEFAULTS.model;save();toast('已儲存')}
